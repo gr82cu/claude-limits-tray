@@ -121,3 +121,7 @@ Both live in `%APPDATA%\ClaudeLimits\`.
 | `requirements.txt` | `pystray` and `Pillow` |
 | `.claude/CLAUDE.md` | design decisions and the reasoning behind them |
 | `LICENSE` | MIT |
+
+## Disclaimer
+
+Claude Limits is an independent project, not affiliated with or endorsed by Anthropic. "Claude" and "Anthropic" are trademarks of Anthropic, PBC, used here only to describe what the tool works with.
