@@ -533,6 +533,15 @@ def get_usage(max_age: float = CACHE_FRESH_SECONDS) -> Usage:
 
 # --- (5) Icon rendering ------------------------------------------------------
 
+def _set_dpi_awareness() -> None:
+    try:
+        import ctypes
+
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:  # noqa: BLE001 - already set, or pre-8.1
+        pass
+
+
 def tray_icon_size() -> int:
     """The pixel size Windows wants for a tray icon on this display.
 
@@ -543,17 +552,13 @@ def tray_icon_size() -> int:
     try:
         import ctypes
 
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)
-        except Exception:  # noqa: BLE001 - already set, or pre-8.1
-            pass
         size = int(ctypes.windll.user32.GetSystemMetrics(49))  # SM_CXSMICON
         return size if 12 <= size <= 256 else 32
     except Exception:  # noqa: BLE001
         return 32
 
 
-CANVAS = tray_icon_size()
+_set_dpi_awareness()
 
 _font_cache: dict[tuple[int, str], object] = {}
 
@@ -692,7 +697,7 @@ def render_icon(usage: Usage, settings: Settings | None = None) -> Image.Image:
     theme = taskbar_theme()
     palette = PALETTE[theme]
 
-    size = CANVAS
+    size = tray_icon_size()
     image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
 
