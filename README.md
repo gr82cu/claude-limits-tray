@@ -2,6 +2,10 @@
 
 A Windows system-tray gauge for your Claude usage limits. The session percentage **and** the reset countdown are drawn inside the tray icon itself: always visible, no hover, no click, the same way Windows shows battery percentage.
 
+![Claude Limits in the Windows taskbar: a red 99 over a 17m countdown, left of the ENG US language indicator](pictures/tray.png)
+
+*The red `99` over `17m` is Claude Limits, just left of the ENG US language indicator: 99% of the session window used, 17 minutes until it resets.*
+
 ## Other tools in this space
 
 Several projects do this, and most are more complete than this one:
