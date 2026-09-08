@@ -1,0 +1,28 @@
+# Claude Limits - runtime dependencies. Windows only.
+#
+#   pip install -r requirements.txt
+#
+# Version floors below are taken from the release that introduced each API the
+# code actually calls, not from the versions this was developed against. Only
+# the tested versions noted per package have been run.
+
+# Tray icon, menu and toast notifications.
+#
+# The Windows backend is used directly, including one private symbol -
+# pystray._util.win32.Shell_NotifyIcon - to detect an icon registration that
+# Windows refused, which pystray itself discards. That access is wrapped in
+# try/except and degrades to trusting the call, so a release that moves or
+# renames it costs the retry check rather than the app.
+#
+# Tested against 0.19.5.
+pystray>=0.19.0
+
+# Icon rendering.
+#
+# The floor is set by ImageDraw.rounded_rectangle, added in Pillow 8.2. Also
+# required: ImageDraw.textbbox (8.0) and FreeType variable-font instances via
+# ImageFont.set_variation_by_name (6.0) - the latter is what makes Bahnschrift
+# Bold Condensed available, and therefore what makes the two-row layout fit.
+#
+# Tested against 12.3.0.
+Pillow>=8.2.0
