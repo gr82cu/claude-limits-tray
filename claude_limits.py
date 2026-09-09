@@ -278,8 +278,8 @@ class Gauge:
         """The same countdown compressed to at most 4 characters, for the icon.
 
         Format adapts to magnitude so the text stays as large as the 32px canvas
-        allows: "6d" over a day out, "1:32" within the day, "32m" inside the hour,
-        "now" when it is about to roll over.
+        allows: "6d" over a day out, "12h" from ten hours to a day, "1:32" inside
+        ten hours, "32m" inside the hour, "now" when it is about to roll over.
         """
         if self.resets_at is None:
             return ""
@@ -290,8 +290,10 @@ class Gauge:
         if minutes < 60:
             return f"{minutes}m"
         hours, mins = divmod(minutes, 60)
-        if hours < 24:
+        if hours < 10:
             return f"{hours}:{mins:02d}"
+        if hours < 24:
+            return f"{hours}h"
         return f"{hours // 24}d"
 
     def summary(self) -> str:
