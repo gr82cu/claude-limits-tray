@@ -96,7 +96,7 @@ anthropic-beta: oauth-2025-04-20
 
 **Undocumented and internal.** Anthropic can change the response without notice, so every field is read defensively: wrong types, missing keys and unknown keys are skipped rather than raising.
 
-Polls every 180s, backing off to 300s, 600s then 1800s after consecutive failures. The endpoint rate-limits hard and returns `Retry-After: 0`, which is no guidance at all, so a 429 backs off 900s instead. The icon repaints every 20s from memory so the countdown ticks without a request, and **Refresh now** forces a real one.
+Polls every 180s, backing off to 300s, 600s then 1800s after consecutive failures, and every 15 minutes while you are away (no input for 5 minutes, a locked screen, or a screensaver). The endpoint rate-limits hard. Since October 2026 a 429 comes with a real `Retry-After`, typically the rest of a one-hour lockout; the app waits what the server asks but at most 15 minutes, and the tooltip shows when it will try next. A zero or missing `Retry-After` also means 15 minutes. The icon repaints every 20s from memory so the countdown ticks without a request, and **Refresh now** forces a real one.
 
 On any failure the last known numbers stay on screen with the error as a footnote. Blanking the display would read as "plenty left", which is the wrong signal when the poll is broken.
 

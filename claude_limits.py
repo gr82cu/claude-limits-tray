@@ -36,7 +36,7 @@ import urllib.error
 import urllib.request
 import winreg
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pystray
 from PIL import Image, ImageDraw
@@ -91,8 +91,13 @@ def setup_logging() -> None:
 # top of the login-started copy is routine.
 CACHE_FRESH_SECONDS = 110
 
-# How long to wait after a 429 when the server declines to say.
+# How long to wait after a 429 when the server declines to say, and the most we
+# wait even when it does. Since October 2026 the server sends a real Retry-After,
+# typically the rest of a one-hour lockout counted from the first 429. Waiting all
+# of it leaves the icon an hour stale; one request every 15 minutes while locked
+# out has not been seen to extend the lockout.
 RATE_LIMIT_BACKOFF = 900
+RATE_LIMIT_MAX_WAIT = 900
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE_NAME = "ClaudeLimits"
@@ -107,6 +112,12 @@ MUTEX_NAME = r"Local\ClaudeLimits"
 BASE_INTERVAL = 180
 BACKOFF_LADDER = ((3, 300), (6, 600))
 MAX_INTERVAL = 1800
+
+# Nobody reads the tray while away from the keyboard, so polling slows down after
+# AWAY_AFTER seconds without input (which also covers a locked screen) or while a
+# screensaver runs. A third of the 429s logged before this change came while idle.
+AWAY_AFTER = 300
+AWAY_INTERVAL = 900
 
 # Colors by how much of the window is USED (high = close to the limit). Two
 # palettes: the taskbar can be light or dark, and a single palette that reads on
@@ -427,17 +438,22 @@ def fetch_usage() -> Usage:
             # Claude Code command refreshes it for us.
             return Usage(error="Token rejected - run any Claude Code command to refresh")
         if exc.code == 429:
-            # The endpoint sends "Retry-After: 0", which would mean retry
-            # immediately and is exactly the wrong thing to do while limited.
-            # Honour the header only when it is a sane positive number.
+            # Honour Retry-After only when it is a sane positive number: until
+            # October 2026 the endpoint sent "Retry-After: 0", which would mean
+            # retry immediately while limited. Cap it, see RATE_LIMIT_MAX_WAIT.
+            header = exc.headers.get("Retry-After", "")
             delay = None
             try:
-                delay = float(exc.headers.get("Retry-After", ""))
+                delay = float(header)
             except (TypeError, ValueError):
                 delay = None
             if not delay or delay <= 0:
                 delay = RATE_LIMIT_BACKOFF
-            return Usage(error="Rate limited - backing off", retry_after=delay)
+            delay = min(delay, RATE_LIMIT_MAX_WAIT)
+            log.info("429 with Retry-After %r; next try in %.0fs", header, delay)
+            next_try = datetime.now() + timedelta(seconds=delay)
+            return Usage(error=f"Rate limited - next try {next_try:%H:%M}",
+                         retry_after=delay)
         return Usage(error=f"HTTP {exc.code}")
     except urllib.error.URLError as exc:
         return Usage(error=f"Offline or unreachable ({exc.reason})")
@@ -884,7 +900,7 @@ def show_icon(icon: pystray.Icon, attempts: int = 10) -> bool:
     return False
 
 
-# --- (8) Single instance -----------------------------------------------------
+# --- (8) Single instance and idle detection ----------------------------------
 
 # Held for the life of the process. Windows frees a mutex when its last handle
 # closes, so this must not be garbage-collected - and equally, a crash cannot
@@ -927,6 +943,52 @@ def claim_single_instance(name: str = MUTEX_NAME) -> bool:
         return True
 
 
+def seconds_since_input() -> float | None:
+    """Seconds since the last keyboard or mouse input in this session, or None.
+
+    A locked workstation receives no input in the user's session, so it counts
+    as idle without a separate lock check.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class LastInputInfo(ctypes.Structure):
+            _fields_ = (("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD))
+
+        info = LastInputInfo()
+        info.cbSize = ctypes.sizeof(info)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return None
+        # Both are 32-bit tick counts; masking keeps the difference right across
+        # the 49.7-day wrap.
+        now = ctypes.windll.kernel32.GetTickCount()
+        return ((now - info.dwTime) & 0xFFFFFFFF) / 1000.0
+    except Exception:  # noqa: BLE001 - unknown means "not away"
+        return None
+
+
+def screensaver_running() -> bool:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        running = wintypes.BOOL(False)
+        spi_getscreensaverrunning = 0x0072
+        ctypes.windll.user32.SystemParametersInfoW(
+            spi_getscreensaverrunning, 0, ctypes.byref(running), 0)
+        return bool(running.value)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def user_away() -> bool:
+    """True when nobody is looking at the tray. Any failure reads as present, so
+    a broken check can only cost requests, never freshness."""
+    idle = seconds_since_input()
+    return (idle is not None and idle >= AWAY_AFTER) or screensaver_running()
+
+
 # --- (9) The app -------------------------------------------------------------
 
 
@@ -938,7 +1000,10 @@ class ClaudeLimitsApp:
         self.last_polled: datetime | None = None
         self.notified_below = False
         self.force_poll = False
-        self.retry_after: float | None = None
+        # Monotonic times: when the last poll ran, and until when a 429 holds polling.
+        self.last_poll_at: float | None = None
+        self.retry_until = 0.0
+        self.away = False
         self.wake = threading.Event()
         self.stopping = threading.Event()
         self.icon = pystray.Icon(
@@ -1101,8 +1166,6 @@ class ClaudeLimitsApp:
             self.maybe_notify()
         else:
             self.consecutive_failures += 1
-        # A server-dictated wait overrides our own cadence for the next round.
-        self.retry_after = usage.retry_after
         self.redraw()
         self.icon.update_menu()
 
@@ -1114,10 +1177,9 @@ class ClaudeLimitsApp:
         can run far more often than the poll.
         """
         show_icon(icon)
-        next_poll = 0.0
         while not self.stopping.is_set():
             try:
-                next_poll = self.tick(next_poll)
+                self.tick()
             except Exception:  # noqa: BLE001
                 # pystray runs this on a setup thread with no exception handling,
                 # so anything escaping kills polling while the icon stays up -
@@ -1125,16 +1187,35 @@ class ClaudeLimitsApp:
                 self.consecutive_failures += 1
                 log.exception("Poll cycle failed (consecutive failure %d)",
                               self.consecutive_failures)
-                next_poll = time.monotonic() + self.poll_interval()
+                self.last_poll_at = time.monotonic()
             if self.stopping.is_set():
                 break
-            wait = min(REDRAW_INTERVAL, max(1.0, next_poll - time.monotonic()))
+            wait = min(REDRAW_INTERVAL, max(1.0, self.next_due() - time.monotonic()))
             self.wake.wait(wait)
             self.wake.clear()
 
-    def tick(self, next_poll: float) -> float:
-        """One pass: poll if due, otherwise just repaint. Returns the next due time."""
-        if self.force_poll or time.monotonic() >= next_poll:
+    def next_due(self) -> float:
+        """Monotonic time the next poll is due.
+
+        Re-evaluated on every pass rather than fixed when the last poll ran, so
+        coming back to the keyboard takes effect within one repaint instead of
+        after the rest of a 15-minute away interval.
+        """
+        if self.last_poll_at is None:
+            return 0.0
+        interval = self.poll_interval()
+        if self.away:
+            interval = max(interval, AWAY_INTERVAL)
+        return max(self.last_poll_at + interval, self.retry_until)
+
+    def tick(self) -> None:
+        """One pass: poll if due, otherwise just repaint."""
+        away = user_away()
+        if away != self.away:
+            self.away = away
+            log.info("User %s; polling every %ds", "away" if away else "back",
+                     AWAY_INTERVAL if away else BASE_INTERVAL)
+        if self.force_poll or time.monotonic() >= self.next_due():
             forced = self.force_poll
             self.force_poll = False
             # A forced refresh must bypass the cache, or "Refresh now" is a no-op
@@ -1148,9 +1229,12 @@ class ClaudeLimitsApp:
                          usage.session.used_percent, usage.weekly.used_percent)
             else:
                 log.warning("Poll failed: %s", usage.error)
-            return time.monotonic() + (self.retry_after or self.poll_interval())
+            self.last_poll_at = time.monotonic()
+            # A server-dictated wait overrides our own cadence for the next round.
+            self.retry_until = (self.last_poll_at + usage.retry_after
+                                if usage.retry_after else 0.0)
+            return
         self.redraw()
-        return next_poll
 
     def run(self) -> None:
         self.icon.run(setup=self.loop)
