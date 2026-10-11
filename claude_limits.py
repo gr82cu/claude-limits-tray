@@ -89,7 +89,7 @@ def setup_logging() -> None:
 # A snapshot younger than this is reused rather than re-fetched, so a restart
 # inside the window costs no request - the common case, since a manual launch on
 # top of the login-started copy is routine.
-CACHE_FRESH_SECONDS = 110
+CACHE_FRESH_SECONDS = 180
 
 # How long to wait after a 429 when the server declines to say, and the most we
 # wait even when it does. Since October 2026 the server sends a real Retry-After,
@@ -108,8 +108,9 @@ RUN_VALUE_NAME = "ClaudeLimits"
 MUTEX_NAME = r"Local\ClaudeLimits"
 
 # Poll cadence, and the backoff ladder after consecutive failures: don't hammer
-# the endpoint when it's unhappy.
-BASE_INTERVAL = 180
+# the endpoint when it's unhappy. 240s is 15 requests an hour; the October 2026
+# log shows 429s after about 18-20 an hour at the old 180s.
+BASE_INTERVAL = 240
 BACKOFF_LADDER = ((3, 300), (6, 600))
 MAX_INTERVAL = 1800
 
@@ -118,6 +119,17 @@ MAX_INTERVAL = 1800
 # screensaver runs. A third of the 429s logged before this change came while idle.
 AWAY_AFTER = 300
 AWAY_INTERVAL = 900
+
+# After a 429, poll at most every COOLDOWN_INTERVAL for COOLDOWN_AFTER_429 seconds.
+# Going straight back to full speed once a lockout ends tends to run into the next.
+COOLDOWN_AFTER_429 = 3600
+COOLDOWN_INTERVAL = 600
+
+# A token the server rejected is not sent again until Claude Code writes a new one,
+# or this long has passed (in case the rejection was a fluke). Requests with a dead
+# token still count against the rate limit: on 11 Oct 2026 four of them in a row
+# were followed by a one-hour lockout.
+REJECTED_TOKEN_RETRY = 3600
 
 # Colors by how much of the window is USED (high = close to the limit). Two
 # palettes: the taskbar can be light or dark, and a single palette that reads on
@@ -326,6 +338,9 @@ class Usage:
     # Seconds the caller should wait before trying again, when the server told us
     # to back off. None means "use the normal cadence".
     retry_after: float | None = None
+    # True when no request was sent (the token is known to be rejected), so the
+    # failure says nothing about the endpoint and must not grow the backoff.
+    skipped: bool = False
 
     @property
     def ok(self) -> bool:
@@ -412,12 +427,23 @@ def parse_usage(payload: dict) -> Usage:
     return usage
 
 
+# The last token the server rejected, and when (monotonic). See REJECTED_TOKEN_RETRY.
+_rejected_token: str | None = None
+_rejected_at = 0.0
+
+TOKEN_REJECTED = "Token rejected - run any Claude Code command to refresh"
+
+
 def fetch_usage() -> Usage:
     """One poll. Never raises; failures come back on Usage.error."""
+    global _rejected_token, _rejected_at
     try:
         token = read_access_token()
     except AuthError as exc:
         return Usage(error=str(exc))
+    if (token == _rejected_token
+            and time.monotonic() - _rejected_at < REJECTED_TOKEN_RETRY):
+        return Usage(error=TOKEN_REJECTED, skipped=True)
 
     request = urllib.request.Request(
         USAGE_URL,
@@ -436,7 +462,10 @@ def fetch_usage() -> Usage:
             # We deliberately do NOT refresh the token ourselves: rotating it
             # could desync Claude Code's own credentials file. Running any
             # Claude Code command refreshes it for us.
-            return Usage(error="Token rejected - run any Claude Code command to refresh")
+            _rejected_token, _rejected_at = token, time.monotonic()
+            log.info("HTTP %d; not sending this token again until it changes",
+                     exc.code)
+            return Usage(error=TOKEN_REJECTED)
         if exc.code == 429:
             # Honour Retry-After only when it is a sane positive number: until
             # October 2026 the endpoint sent "Retry-After: 0", which would mean
@@ -545,6 +574,7 @@ def get_usage(max_age: float = CACHE_FRESH_SECONDS) -> Usage:
     if stale is not None:
         stale.error = usage.error
         stale.retry_after = usage.retry_after
+        stale.skipped = usage.skipped
         return stale
     return usage
 
@@ -1003,6 +1033,7 @@ class ClaudeLimitsApp:
         # Monotonic times: when the last poll ran, and until when a 429 holds polling.
         self.last_poll_at: float | None = None
         self.retry_until = 0.0
+        self.last_429_at: float | None = None
         self.away = False
         self.wake = threading.Event()
         self.stopping = threading.Event()
@@ -1164,7 +1195,7 @@ class ClaudeLimitsApp:
             self.consecutive_failures = 0
             self.last_polled = datetime.now(timezone.utc)
             self.maybe_notify()
-        else:
+        elif not usage.skipped:
             self.consecutive_failures += 1
         self.redraw()
         self.icon.update_menu()
@@ -1206,6 +1237,9 @@ class ClaudeLimitsApp:
         interval = self.poll_interval()
         if self.away:
             interval = max(interval, AWAY_INTERVAL)
+        if (self.last_429_at is not None
+                and time.monotonic() - self.last_429_at < COOLDOWN_AFTER_429):
+            interval = max(interval, COOLDOWN_INTERVAL)
         return max(self.last_poll_at + interval, self.retry_until)
 
     def tick(self) -> None:
@@ -1233,6 +1267,8 @@ class ClaudeLimitsApp:
             # A server-dictated wait overrides our own cadence for the next round.
             self.retry_until = (self.last_poll_at + usage.retry_after
                                 if usage.retry_after else 0.0)
+            if usage.retry_after:
+                self.last_429_at = self.last_poll_at
             return
         self.redraw()
 
