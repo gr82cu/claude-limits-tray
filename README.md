@@ -100,6 +100,21 @@ Polls every 240s, backing off to 300s, 600s then 1800s after consecutive failure
 
 On any failure the last known numbers stay on screen with the error as a footnote. Blanking the display would read as "plenty left", which is the wrong signal when the poll is broken.
 
+## Fewer 429s: feed it from Claude Code's status line (optional)
+
+Claude Code calls the same usage endpoint on the same account, so on a busy day the tray runs into 429s after only a handful of its own requests. But Claude Code already hands its status line the five-hour and weekly figures, taken from requests it was making anyway. `statusline.py` writes them into the tray's snapshot, and the tray uses that instead of polling for up to 10 minutes. While you work in Claude Code the tray sends no requests at all; once Claude Code goes quiet it polls again as above.
+
+Add this to `~/.claude/settings.json`:
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "python C:/path/to/claude-limits/statusline.py"
+}
+```
+
+Claude Code then shows `5h 41% · wk 20%` at the bottom. Already have a status line? Put its command after `--` and it gets the same input, with its output shown instead: `python C:/path/to/statusline.py -- your-existing-command`. Only the percentages and reset times are read from the status line input; nothing else is written anywhere. Remove the entry and the tray goes back to polling on its own.
+
 ## Settings and log
 
 Both live in `%APPDATA%\ClaudeLimits\`.
@@ -121,6 +136,7 @@ Both live in `%APPDATA%\ClaudeLimits\`.
 | | |
 |---|---|
 | `claude_limits.py` | the whole app |
+| `statusline.py` | optional Claude Code status line that feeds the tray, see above |
 | `start-claude-limits.cmd` | launches it via `pythonw` (no console window) |
 | `requirements.txt` | `pystray` and `Pillow` |
 | `.claude/CLAUDE.md` | design decisions and the reasoning behind them |

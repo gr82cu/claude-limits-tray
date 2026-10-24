@@ -91,6 +91,12 @@ def setup_logging() -> None:
 # top of the login-started copy is routine.
 CACHE_FRESH_SECONDS = 180
 
+# A snapshot written by statusline.py (Claude Code's status line) is reused for
+# longer: it costs no request at all, and Claude Code shares this endpoint's rate
+# limit, so while it is busy every poll we skip is one less 429. Once Claude Code
+# goes quiet the snapshot ages out and the tray polls again on its own.
+STATUSLINE_FRESH_SECONDS = 600
+
 # How long to wait after a 429 when the server declines to say, and the most we
 # wait even when it does. Since October 2026 the server sends a real Retry-After,
 # typically the rest of a one-hour lockout counted from the first 429. Waiting all
@@ -341,6 +347,9 @@ class Usage:
     # True when no request was sent (the token is known to be rejected), so the
     # failure says nothing about the endpoint and must not grow the backoff.
     skipped: bool = False
+    # "poll" for a reading from the endpoint, "statusline" for one statusline.py
+    # wrote from Claude Code's own figures.
+    source: str = "poll"
 
     @property
     def ok(self) -> bool:
@@ -534,13 +543,17 @@ def write_snapshot(usage: Usage) -> None:
                     exc_info=True)
 
 
-def read_snapshot(max_age: float) -> Usage | None:
-    """A cached reading younger than ``max_age`` seconds, or None."""
+def read_snapshot(max_age: float, source: str | None = None) -> Usage | None:
+    """A cached reading younger than ``max_age`` seconds, or None. With
+    ``source``, only a snapshot from that source counts."""
     try:
         with open(SNAPSHOT_PATH, encoding="utf-8") as fh:
             data = json.load(fh)
         fetched = _as_time(data.get("fetched_at"))
         if fetched is None:
+            return None
+        written_by = data.get("source") or "poll"
+        if source is not None and written_by != source:
             return None
         age = (datetime.now(timezone.utc) - fetched).total_seconds()
         if age < 0 or age > max_age:
@@ -550,6 +563,7 @@ def read_snapshot(max_age: float) -> Usage | None:
             weekly=_gauge_from_dict(data.get("weekly") or {}),
             extra=[_gauge_from_dict(g) for g in (data.get("extra") or [])
                    if isinstance(g, dict)],
+            source=str(written_by),
         )
         return usage if usage.ok else None
     except (OSError, ValueError, TypeError):
@@ -562,6 +576,8 @@ def get_usage(max_age: float = CACHE_FRESH_SECONDS) -> Usage:
     A restart inside the cache window is free rather than costing an immediate poll.
     """
     cached = read_snapshot(max_age)
+    if cached is None and max_age > 0:
+        cached = read_snapshot(STATUSLINE_FRESH_SECONDS, source="statusline")
     if cached is not None:
         return cached
     usage = fetch_usage()
@@ -1259,7 +1275,9 @@ class ClaudeLimitsApp:
                 usage.error = None
             self.apply(usage)
             if usage.ok:
-                log.info("Poll ok: session %s%%, weekly %s%%",
+                log.info("%s: session %s%%, weekly %s%%",
+                         "From status line" if usage.source == "statusline"
+                         else "Poll ok",
                          usage.session.used_percent, usage.weekly.used_percent)
             else:
                 log.warning("Poll failed: %s", usage.error)
