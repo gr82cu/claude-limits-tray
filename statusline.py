@@ -6,8 +6,9 @@ taken from the headers of requests Claude Code was making anyway. Writing them
 into the tray's snapshot means the tray skips its own poll while Claude Code is
 busy - which is exactly when the shared /api/oauth/usage budget runs out.
 
-Only the percentages and reset times are read. Nothing else from the blob
-(session id, paths, model) is written anywhere.
+Only the percentages, reset times and context size are read, and only the
+percentages and reset times are saved. Nothing else from the blob (session id,
+paths, model) is written anywhere. The context size is only displayed.
 
 Usage, in ~/.claude/settings.json:
 
@@ -91,16 +92,38 @@ def write_snapshot(limits: dict) -> tuple[float | None, float | None]:
     return session, weekly
 
 
+def context_tokens(data: dict) -> float | None:
+    """Tokens in the context now, from the last request's usage if it's there."""
+    window = data.get("context_window")
+    if not isinstance(window, dict):
+        return None
+    usage = window.get("current_usage")
+    if isinstance(usage, dict):
+        counts = [usage.get(key) for key in ("input_tokens",
+                                             "cache_creation_input_tokens",
+                                             "cache_read_input_tokens")]
+        counts = [n for n in counts
+                  if isinstance(n, (int, float)) and not isinstance(n, bool)]
+        if counts:
+            return float(sum(counts))
+    percent, size = _percent(window), window.get("context_window_size")
+    if percent is None or isinstance(size, bool) or not isinstance(size, (int, float)):
+        return None
+    return percent / 100 * size
+
+
 def main() -> int:
     # Claude Code reads UTF-8; the Windows console default would mangle the dot.
     sys.stdout.reconfigure(encoding="utf-8")
     raw = sys.stdin.read()
-    session = weekly = None
+    session = weekly = context = None
     try:
         data = json.loads(raw)
         limits = data.get("rate_limits") if isinstance(data, dict) else None
         if isinstance(limits, dict):
             session, weekly = write_snapshot(limits)
+        if isinstance(data, dict):
+            context = context_tokens(data)
     except ValueError:
         pass
 
@@ -121,6 +144,8 @@ def main() -> int:
         parts.append(f"5h {session:.0f}%")
     if weekly is not None:
         parts.append(f"wk {weekly:.0f}%")
+    if context is not None:
+        parts.append(f"ctx {context / 1000:.0f}k")
     print(" · ".join(parts))
     return 0
 
