@@ -113,7 +113,7 @@ Add this to `~/.claude/settings.json`:
 }
 ```
 
-Claude Code then shows `5h 41% · wk 20%` at the bottom. Already have a status line? Put its command after `--` and it gets the same input, with its output shown instead: `python C:/path/to/statusline.py -- your-existing-command`. Only the percentages and reset times are read from the status line input; nothing else is written anywhere. Remove the entry and the tray goes back to polling on its own.
+Claude Code then shows `5h 41% · wk 20% · ctx 76k` at the bottom, where `ctx` is the tokens in the current context. Already have a status line? Put its command after `--` and it gets the same input, with its output shown instead: `python C:/path/to/statusline.py -- your-existing-command`. Only the percentages, reset times and context size are read from the status line input. The context size is only displayed; nothing else is written anywhere. Remove the entry and the tray goes back to polling on its own.
 
 ## Settings and log
 
